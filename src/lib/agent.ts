@@ -24,6 +24,7 @@ export async function getOrCreateAgent(privateKey: `0x${string}`) {
       configuration: {
         baseURL: "https://openrouter.ai/api/v1",
       },
+      temperature: 0, // Make responses more deterministic
     });
 
     console.error("OpenAI client created, configuring wallet...");
@@ -41,7 +42,7 @@ export async function getOrCreateAgent(privateKey: `0x${string}`) {
     const toolkit = new AgentkitToolkit(agentkit);
     const tools = toolkit.getTools();
 
-    console.error(`Loaded ${tools.length} tools`);
+    console.error(`Loaded ${tools.length} tools:`, tools.map(t => t.name));
 
     const memory = new MemorySaver();
     const config = { configurable: { thread_id: "0xGasless AgentKit Chat" } };
@@ -52,25 +53,32 @@ export async function getOrCreateAgent(privateKey: `0x${string}`) {
       llm,
       tools: tools as StructuredTool[],
       checkpointSaver: memory,
-      messageModifier: `You are a smart account built by 0xGasless Smart SDK operating exclusively on Binance Smart Chain (BSC). You are capable of gasless blockchain interactions on BSC. You can perform actions without requiring users to hold BNB for gas fees via erc-4337 account abstraction standard.
+      messageModifier: `You are a direct blockchain execution agent built by 0xGasless Smart SDK operating on Binance Smart Chain (BSC). Your job is to EXECUTE blockchain operations directly without asking questions or providing explanations unless there's an error.
 
-Capabilities on BSC:
-- Check balances of BNB and any BEP20 tokens by symbol or address
-- Transfer tokens gaslessly on BSC
-- Perform token swaps without gas fees on BSC
-- Create and deploy new smart accounts on BSC
+CRITICAL INSTRUCTIONS:
+- When asked to execute a blockchain operation, DO IT IMMEDIATELY using the available tools
+- Do NOT ask for confirmation or clarification
+- Do NOT provide explanations unless there's an error
+- Return only the actual result of the operation
+- Be direct and concise
 
-Token Information for BSC (Chain ID: 56):
+Available Tools and Usage:
+- get_wallet_address: Returns the wallet address directly
+- get_balance: Checks token balance for given address (use 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d for USDC)
+- transfer_token: Transfers tokens (execute the transfer immediately)
+- swap_tokens: Swaps tokens (execute the swap immediately)
+
+BSC Token Addresses:
 - USDC: 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d
 - USDT: 0x55d398326f99059fF775485246999027B3197955
 - WETH: 0x4DB5a66E937A9F4473fA95b1cAF1d1E1D62E29EA
 
-When checking token balances on BSC:
-1. For USDC balance: ALWAYS use 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d
-2. For USDT balance: ALWAYS use 0x55d398326f99059fF775485246999027B3197955
-3. For WETH balance: ALWAYS use 0x4DB5a66E937A9F4473fA95b1cAF1d1E1D62E29EA
+When you receive a request:
+1. Identify the required tool
+2. Execute it immediately with the provided parameters
+3. Return only the result
 
-Be concise and helpful in your responses. When users ask about specific actions, execute them directly using the available tools without unnecessary confirmation steps.`,
+Do NOT engage in conversation. Execute operations directly.`,
     });
 
     console.error("Agent created successfully");
@@ -80,29 +88,6 @@ Be concise and helpful in your responses. When users ask about specific actions,
     return instance;
   } catch (error) {
     console.error("Failed to create agent instance:", error);
-    
-    // Return a minimal mock agent that won't try to use crypto
-    return {
-      agent: {
-        stream: async () => {
-          return {
-            async *[Symbol.asyncIterator]() {
-              yield {
-                agent: {
-                  messages: [
-                    {
-                      kwargs: {
-                        content: "I'm sorry, but I couldn't initialize the blockchain tools. This could be due to network issues or configuration problems."
-                      }
-                    }
-                  ]
-                }
-              };
-            }
-          };
-        }
-      },
-      config: { configurable: { thread_id: "fallback-agent" } }
-    };
+    throw error; // Don't return a mock agent, let the error bubble up
   }
 }

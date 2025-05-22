@@ -31,7 +31,7 @@ const tools: Tool[] = [
       properties: {
         address: {
           type: 'string',
-          description: 'Token contract address',
+          description: 'Token contract address (use 0x0000000000000000000000000000000000000000 for BNB)',
         },
       },
       required: ['address'],
@@ -90,7 +90,7 @@ let agentConfig: any = null;
 
 // Initialize agent lazily
 async function getAgent() {
-  if (agentInitialized) {
+  if (agentInitialized && agentInstance && agentConfig) {
     return { agent: agentInstance, config: agentConfig };
   }
 
@@ -139,10 +139,12 @@ export async function main() {
   // Handle tool calls - initialize agent on first use
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
+      console.error(`Executing tool: ${request.params.name} with args:`, request.params.arguments);
+      
       // Get agent (initialize if needed)
       const { agent, config } = await getAgent();
       
-      // Process the request
+      // Process the request with more specific prompts
       const result = await processToolCall(agent, config, request.params.name, request.params.arguments);
       
       return {
@@ -171,35 +173,72 @@ export async function main() {
   await server.connect(transport);
 }
 
-// Process tool calls
+// Process tool calls with more direct instructions
 async function processToolCall(agent: any, config: any, toolName: string, args: any) {
   let prompt = '';
   
   switch (toolName) {
     case 'get-address':
-      prompt = 'What is my wallet address?';
+      prompt = 'Execute the get_wallet_address tool and return only my wallet address. Do not ask questions, just return the address.';
       break;
+      
     case 'get-balance':
-      prompt = `Check my balance of token at address ${args.address}`;
+      const tokenAddress = args.address || '0x0000000000000000000000000000000000000000';
+      prompt = `Execute the get_balance tool for token address ${tokenAddress}. Return the exact balance without asking questions. If this is address 0x0000000000000000000000000000000000000000, check BNB balance.`;
       break;
+      
     case 'transfer-token':
-      prompt = `Transfer ${args.amount} tokens from ${args.address} to ${args.to}`;
+      prompt = `Execute a token transfer: send ${args.amount} tokens from contract ${args.address} to recipient ${args.to}. Perform the actual transfer operation using the transfer tool.`;
       break;
+      
     case 'swap-tokens':
-      prompt = `Swap ${args.amount} tokens from ${args.fromToken} to ${args.toToken}`;
+      prompt = `Execute a token swap: swap ${args.amount} tokens from ${args.fromToken} to ${args.toToken}. Use the swap tool to perform the actual swap operation.`;
       break;
+      
     default:
-      prompt = `Use the ${toolName} tool with arguments: ${JSON.stringify(args)}`;
+      prompt = `Execute the ${toolName} tool with these exact parameters: ${JSON.stringify(args)}. Perform the actual operation, do not ask for clarification.`;
   }
   
-  // Use invoke instead of stream for simpler processing
-  const result = await agent.invoke({ input: prompt }, config);
-  
-  // Extract the response
-  if (result.messages && result.messages.length > 0) {
-    const lastMessage = result.messages[result.messages.length - 1];
-    return lastMessage.content || JSON.stringify(result);
+  try {
+    console.error(`Sending prompt to agent: ${prompt}`);
+    
+    // Use invoke with a more direct configuration
+    const result = await agent.invoke(
+      { 
+        input: prompt,
+        // Add instruction to be direct
+        system: "Execute the requested blockchain operation directly. Do not ask for confirmation or provide explanations unless there's an error. Return only the result."
+      }, 
+      {
+        ...config,
+        // Force direct execution
+        recursionLimit: 10
+      }
+    );
+    
+    console.error('Agent result:', JSON.stringify(result, null, 2));
+    
+    // Better result extraction
+    if (result.messages && result.messages.length > 0) {
+      const lastMessage = result.messages[result.messages.length - 1];
+      
+      // Look for the actual content in the message
+      if (lastMessage.content) {
+        return lastMessage.content;
+      }
+      
+      // Check if it's a tool call result
+      if (lastMessage.additional_kwargs?.tool_calls) {
+        const toolCall = lastMessage.additional_kwargs.tool_calls[0];
+        return `Tool executed: ${toolCall.function.name}\nResult: ${toolCall.function.arguments}`;
+      }
+    }
+    
+    // Fallback to output or stringified result
+    return result.output || result.content || JSON.stringify(result);
+    
+  } catch (error) {
+    console.error('Error in processToolCall:', error);
+    return `Error executing ${toolName}: ${error instanceof Error ? error.message : String(error)}`;
   }
-  
-  return result.output || JSON.stringify(result);
 }
