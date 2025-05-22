@@ -1,0 +1,17 @@
+{
+    "mcpServers": {
+      "0xgasless": {
+        "command": "node",
+        "args": ["/Users/achintyasingh/Desktop/0xgasless-mcp/build/index.js"],
+        "env": {
+          "PRIVATE_KEY": "0x63f9d9361d0619a59745ace3713b953aef6fe9e61a0ba110ed08ab77520cecf2",
+          "RPC_URL": "https://bnb-mainnet.g.alchemy.com/v2/VcifYAbO7TUL14eUvHmbjSklgVzWEMXk",
+          "API_KEY": "923b4fff-6c8e-4181-994d-5ee05df20718",
+          "CHAIN_ID": "56",
+          "OPENROUTER_API_KEY": "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"
+        },
+        "disabled": false,
+        "autoApprove": []
+      }
+    }
+  }

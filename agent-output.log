@@ -1,0 +1,67 @@
+Testing agent with wallet initialization...
+Initializing agent...
+Agent initialized successfully
+
+Testing tool: get-address
+Sending prompt: Use the get-address tool with these arguments: {}
+Stream created, processing chunks:
+
+Chunk 1:
+{
+  "agent": {
+    "messages": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessage"
+        ],
+        "kwargs": {
+          "content": "How can I assist you with your gasless blockchain interactions on the Binance Smart Chain today?",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "tokenUsage": {
+              "promptTokens": 1659,
+              "completionTokens": 19,
+              "totalTokens": 1678
+            },
+            "finish_reason": "stop",
+            "model_name": "openai/gpt-4o",
+            "usage": {
+              "prompt_tokens": 1659,
+              "completion_tokens": 19,
+              "total_tokens": 1678,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "system_fingerprint": "fp_76544d79cb"
+          },
+          "id": "gen-1747837285-8DhaIDf9LBiZcarwuaUQ",
+          "tool_calls": [],
+          "invalid_tool_calls": [],
+          "usage_metadata": {
+            "output_tokens": 19,
+            "input_tokens": 1659,
+            "total_tokens": 1678,
+            "input_token_details": {
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "reasoning": 0
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+Found 1 agent message(s)
+Message 1:
+
+Test completed
