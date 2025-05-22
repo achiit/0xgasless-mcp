@@ -8,6 +8,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import * as dotenv from 'dotenv';
 import { version } from './version.js';
+import { Writable } from 'stream';
 
 // Load environment variables
 dotenv.config();
@@ -16,6 +17,29 @@ dotenv.config();
 let agentkitInstance: Agentkit | null = null;
 let agentkitActions: any[] = [];
 let toolsInitialized = false;
+
+// Create a null stream to suppress stdout during operations
+const nullStream = new Writable({
+  write(chunk, encoding, callback) {
+    callback();
+  }
+});
+
+// Function to suppress stdout during execution
+function withSuppressedStdout<T>(fn: () => Promise<T>): Promise<T> {
+  const originalStdout = process.stdout.write;
+  const originalConsoleLog = console.log;
+  
+  // Redirect stdout and console.log to null during execution
+  process.stdout.write = nullStream.write.bind(nullStream);
+  console.log = () => {}; // Completely silence console.log
+  
+  return fn().finally(() => {
+    // Restore original stdout and console.log
+    process.stdout.write = originalStdout;
+    console.log = originalConsoleLog;
+  });
+}
 
 // Initialize agentkit and get actions
 async function initializeAgentkit() {
@@ -31,25 +55,23 @@ async function initializeAgentkit() {
     const apiKey = process.env.API_KEY as string;
     const chainID = Number(process.env.CHAIN_ID) || 56;
 
-    console.error(`📋 Config: Chain ${chainID}, RPC: ${rpcUrl.substring(0, 50)}...`);
+    console.error(`📋 Config: Chain ${chainID}`);
 
-    // Configure agentkit with wallet - this is the correct method from the repo
-    const agentkit = await Agentkit.configureWithWallet({
-      privateKey,
-      rpcUrl,
-      apiKey,
-      chainID,
+    // Configure agentkit with wallet - suppress any stdout output
+    const agentkit = await withSuppressedStdout(async () => {
+      return await Agentkit.configureWithWallet({
+        privateKey,
+        rpcUrl,
+        apiKey,
+        chainID,
+      });
     });
 
     console.error("✅ Agentkit configured successfully");
 
     // Get all available actions from the agentkit
     const actions = getAllAgentkitActions();
-
-    console.error(`📦 Found ${actions.length} agentkit actions:`);
-    actions.forEach((action, index) => {
-      console.error(`  ${index + 1}. ${action.name}: ${action.description.substring(0, 80)}...`);
-    });
+    console.error(`📦 Found ${actions.length} agentkit actions`);
 
     agentkitInstance = agentkit;
     agentkitActions = actions;
@@ -74,20 +96,17 @@ const MCP_TO_AGENTKIT_MAPPING: Record<string, string> = {
 function convertMcpArgsToAgentkitArgs(mcpToolName: string, mcpArgs: any): any {
   switch (mcpToolName) {
     case 'get-address':
-      return {}; // No arguments needed for get_address
+      return {};
 
     case 'get-balance':
-      // Handle different ways to specify tokens
       if (mcpArgs.address === '0x0000000000000000000000000000000000000000') {
-        // For native token, don't pass any specific token
         return {};
       } else if (mcpArgs.address) {
-        // For specific token address
         return {
           tokenAddresses: [mcpArgs.address]
         };
       }
-      return {}; // Default to all balances
+      return {};
 
     case 'transfer-token':
       return {
@@ -186,9 +205,6 @@ async function executeAgentkitAction(toolName: string, args: any): Promise<strin
   try {
     const { agentkit, actions } = await initializeAgentkit();
     
-    console.error(`\n🔧 Executing: ${toolName}`);
-    console.error(`📥 Args:`, args);
-    
     // Get the correct action name
     const agentkitActionName = MCP_TO_AGENTKIT_MAPPING[toolName];
     if (!agentkitActionName) {
@@ -198,26 +214,20 @@ async function executeAgentkitAction(toolName: string, args: any): Promise<strin
     // Find the action in the available actions
     const action = actions.find((a: any) => a.name === agentkitActionName);
     if (!action) {
-      console.error(`❌ Available actions:`, actions.map((a: any) => a.name));
       throw new Error(`Action ${agentkitActionName} not found in available actions`);
     }
 
-    console.error(`✅ Found action: ${action.name}`);
-
     // Convert MCP arguments to AgentKit arguments
     const actionArgs = convertMcpArgsToAgentkitArgs(toolName, args);
-    console.error(`🔄 Converted args:`, actionArgs);
 
-    // Execute the action using agentkit.run()
-    const result = await agentkit.run(action, actionArgs);
-    
-    console.error(`✅ Action result:`, result);
+    // Execute the action with suppressed stdout to prevent JSON parsing errors
+    const result = await withSuppressedStdout(async () => {
+      return await agentkit.run(action, actionArgs);
+    });
     
     return result;
 
   } catch (error) {
-    console.error(`❌ Error executing ${toolName}:`, error);
-    
     // Provide helpful error messages
     if (error instanceof Error) {
       if (error.message.includes('insufficient funds')) {
@@ -259,12 +269,11 @@ function validateEnvironment(): boolean {
 
 // Log server info
 function logServerInfo() {
-  console.error('\n=== 0xGasless MCP SERVER INFO ===');
+  console.error('\n=== 0xGasless MCP SERVER ===');
   console.error(`Chain ID: ${process.env.CHAIN_ID || '56 (default)'}`);
-  console.error(`RPC URL: ${process.env.RPC_URL}`);
   console.error(`Private Key: ${process.env.PRIVATE_KEY ? '[SET]' : '[NOT SET]'}`);
   console.error(`API Key: ${process.env.API_KEY ? '[SET]' : '[NOT SET]'}`);
-  console.error('=== END SERVER INFO ===\n');
+  console.error('============================\n');
 }
 
 export async function main() {
@@ -300,14 +309,12 @@ export async function main() {
   // Handle tools list
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const mcpTools = convertToMcpTools();
-    console.error(`📤 Returning ${mcpTools.length} MCP tools`);
     return { tools: mcpTools };
   });
 
   // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    console.error(`\n📞 MCP tool call: ${name}`, args);
     
     try {
       const result = await executeAgentkitAction(name, args || {});
@@ -315,7 +322,6 @@ export async function main() {
         content: [{ type: 'text', text: result }],
       };
     } catch (error) {
-      console.error(`❌ Tool call error:`, error);
       return {
         content: [
           {
@@ -329,7 +335,7 @@ export async function main() {
 
   // Connect to transport
   const transport = new StdioServerTransport();
-  console.error('🔌 Connecting server to transport...');
+  console.error('🔌 Starting MCP server...');
   await server.connect(transport);
-  console.error('✅ 0xGasless MCP Server running on stdio');
+  console.error('✅ 0xGasless MCP Server running');
 }
