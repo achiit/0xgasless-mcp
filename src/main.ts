@@ -1,5 +1,4 @@
-// main.ts
-import * as dotenv from 'dotenv';
+import { Agentkit, getAllAgentkitActions } from "@0xgasless/agentkit";
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -7,118 +6,285 @@ import {
   ListToolsRequestSchema,
   type Tool
 } from '@modelcontextprotocol/sdk/types.js';
+import * as dotenv from 'dotenv';
 import { version } from './version.js';
 
 // Load environment variables
 dotenv.config();
 
-// Tool definitions - available immediately
-const tools: Tool[] = [
-  {
-    name: 'get-address',
-    description: 'Gets the wallet address',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: []
-    },
-  },
-  {
-    name: 'get-balance',
-    description: 'Gets the balance of a token',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        address: {
-          type: 'string',
-          description: 'Token contract address (use 0x0000000000000000000000000000000000000000 for BNB)',
-        },
-      },
-      required: ['address'],
-    },
-  },
-  {
-    name: 'transfer-token',
-    description: 'Transfer tokens to another address',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        to: {
-          type: 'string',
-          description: 'Recipient address',
-        },
-        address: {
-          type: 'string',
-          description: 'Token contract address',
-        },
-        amount: {
-          type: 'string',
-          description: 'Amount to transfer',
-        },
-      },
-      required: ['to', 'address', 'amount'],
-    },
-  },
-  {
-    name: 'swap-tokens',
-    description: 'Swap one token for another',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        fromToken: {
-          type: 'string',
-          description: 'Source token address',
-        },
-        toToken: {
-          type: 'string',
-          description: 'Destination token address',
-        },
-        amount: {
-          type: 'string',
-          description: 'Amount to swap',
-        },
-      },
-      required: ['fromToken', 'toToken', 'amount'],
-    },
-  },
-];
+// Global state for agentkit
+let agentkitInstance: Agentkit | null = null;
+let agentkitActions: any[] = [];
+let toolsInitialized = false;
 
-// Agent state
-let agentInitialized = false;
-let agentInstance: any = null;
-let agentConfig: any = null;
-
-// Initialize agent lazily
-async function getAgent() {
-  if (agentInitialized && agentInstance && agentConfig) {
-    return { agent: agentInstance, config: agentConfig };
+// Initialize agentkit and get actions
+async function initializeAgentkit() {
+  if (toolsInitialized && agentkitInstance) {
+    return { agentkit: agentkitInstance, actions: agentkitActions };
   }
 
-  // Import dynamically to avoid blocking server startup
-  const { getOrCreateAgent } = await import('./lib/agent.js');
+  try {
+    console.error("🚀 Initializing 0xGasless Agentkit...");
+    
+    const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
+    const rpcUrl = process.env.RPC_URL as string;
+    const apiKey = process.env.API_KEY as string;
+    const chainID = Number(process.env.CHAIN_ID) || 56;
+
+    console.error(`📋 Config: Chain ${chainID}, RPC: ${rpcUrl.substring(0, 50)}...`);
+
+    // Configure agentkit with wallet - this is the correct method from the repo
+    const agentkit = await Agentkit.configureWithWallet({
+      privateKey,
+      rpcUrl,
+      apiKey,
+      chainID,
+    });
+
+    console.error("✅ Agentkit configured successfully");
+
+    // Get all available actions from the agentkit
+    const actions = getAllAgentkitActions();
+
+    console.error(`📦 Found ${actions.length} agentkit actions:`);
+    actions.forEach((action, index) => {
+      console.error(`  ${index + 1}. ${action.name}: ${action.description.substring(0, 80)}...`);
+    });
+
+    agentkitInstance = agentkit;
+    agentkitActions = actions;
+    toolsInitialized = true;
+
+    return { agentkit, actions };
+  } catch (error) {
+    console.error("❌ Failed to initialize Agentkit:", error);
+    throw error;
+  }
+}
+
+// Tool name mapping between MCP and AgentKit
+const MCP_TO_AGENTKIT_MAPPING: Record<string, string> = {
+  'get-address': 'get_address',
+  'get-balance': 'get_balance', 
+  'transfer-token': 'smart_transfer',
+  'swap-tokens': 'smart_swap',
+};
+
+// Convert MCP arguments to AgentKit arguments
+function convertMcpArgsToAgentkitArgs(mcpToolName: string, mcpArgs: any): any {
+  switch (mcpToolName) {
+    case 'get-address':
+      return {}; // No arguments needed for get_address
+
+    case 'get-balance':
+      // Handle different ways to specify tokens
+      if (mcpArgs.address === '0x0000000000000000000000000000000000000000') {
+        // For native token, don't pass any specific token
+        return {};
+      } else if (mcpArgs.address) {
+        // For specific token address
+        return {
+          tokenAddresses: [mcpArgs.address]
+        };
+      }
+      return {}; // Default to all balances
+
+    case 'transfer-token':
+      return {
+        amount: mcpArgs.amount,
+        tokenAddress: mcpArgs.address === '0x0000000000000000000000000000000000000000' ? 'eth' : mcpArgs.address,
+        destination: mcpArgs.to
+      };
+
+    case 'swap-tokens':
+      return {
+        tokenIn: mcpArgs.fromToken,
+        tokenOut: mcpArgs.toToken,
+        amount: mcpArgs.amount
+      };
+
+    default:
+      return mcpArgs;
+  }
+}
+
+// Convert agentkit actions to MCP tools format
+function convertToMcpTools(): Tool[] {
+  return [
+    {
+      name: 'get-address',
+      description: 'Gets the smart account wallet address',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        required: []
+      },
+    },
+    {
+      name: 'get-balance',
+      description: 'Gets the balance of tokens in the smart account',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          address: {
+            type: 'string',
+            description: 'Token contract address (use "0x0000000000000000000000000000000000000000" for native token like BNB/ETH)',
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'transfer-token',
+      description: 'Transfer tokens gaslessly to another address',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: {
+            type: 'string',
+            description: 'Recipient address',
+          },
+          address: {
+            type: 'string',
+            description: 'Token contract address (use "0x0000000000000000000000000000000000000000" for native token)',
+          },
+          amount: {
+            type: 'string',
+            description: 'Amount to transfer',
+          },
+        },
+        required: ['to', 'address', 'amount'],
+      },
+    },
+    {
+      name: 'swap-tokens',
+      description: 'Swap one token for another gaslessly',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          fromToken: {
+            type: 'string',
+            description: 'Source token address',
+          },
+          toToken: {
+            type: 'string',
+            description: 'Destination token address',
+          },
+          amount: {
+            type: 'string',
+            description: 'Amount to swap',
+          },
+        },
+        required: ['fromToken', 'toToken', 'amount'],
+      },
+    },
+  ];
+}
+
+// Execute agentkit actions directly
+async function executeAgentkitAction(toolName: string, args: any): Promise<string> {
+  try {
+    const { agentkit, actions } = await initializeAgentkit();
+    
+    console.error(`\n🔧 Executing: ${toolName}`);
+    console.error(`📥 Args:`, args);
+    
+    // Get the correct action name
+    const agentkitActionName = MCP_TO_AGENTKIT_MAPPING[toolName];
+    if (!agentkitActionName) {
+      throw new Error(`No mapping found for MCP tool: ${toolName}`);
+    }
+
+    // Find the action in the available actions
+    const action = actions.find((a: any) => a.name === agentkitActionName);
+    if (!action) {
+      console.error(`❌ Available actions:`, actions.map((a: any) => a.name));
+      throw new Error(`Action ${agentkitActionName} not found in available actions`);
+    }
+
+    console.error(`✅ Found action: ${action.name}`);
+
+    // Convert MCP arguments to AgentKit arguments
+    const actionArgs = convertMcpArgsToAgentkitArgs(toolName, args);
+    console.error(`🔄 Converted args:`, actionArgs);
+
+    // Execute the action using agentkit.run()
+    const result = await agentkit.run(action, actionArgs);
+    
+    console.error(`✅ Action result:`, result);
+    
+    return result;
+
+  } catch (error) {
+    console.error(`❌ Error executing ${toolName}:`, error);
+    
+    // Provide helpful error messages
+    if (error instanceof Error) {
+      if (error.message.includes('insufficient funds')) {
+        return `Error: Insufficient funds for ${toolName}. Please ensure you have enough balance and gas.`;
+      }
+      if (error.message.includes('invalid address')) {
+        return `Error: Invalid address provided for ${toolName}. Please check the address format.`;
+      }
+      if (error.message.includes('Smart Account is required')) {
+        return `Error: Smart account configuration issue. Please check your environment variables.`;
+      }
+      return `Error executing ${toolName}: ${error.message}`;
+    }
+    
+    return `Error executing ${toolName}: ${String(error)}`;
+  }
+}
+
+// Validation function
+function validateEnvironment(): boolean {
+  const required = ['PRIVATE_KEY', 'RPC_URL', 'API_KEY'];
+  const missing = required.filter(key => !process.env[key]);
   
-  const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
-  const result = await getOrCreateAgent(privateKey);
+  if (missing.length > 0) {
+    console.error('❌ Missing required environment variables:', missing);
+    return false;
+  }
   
-  agentInstance = result.agent;
-  agentConfig = result.config;
-  agentInitialized = true;
+  // Validate private key format
+  const privateKey = process.env.PRIVATE_KEY;
+  if (privateKey && !privateKey.startsWith('0x')) {
+    console.error('❌ PRIVATE_KEY should start with 0x');
+    return false;
+  }
   
-  return result;
+  console.error('✅ Environment variables validated');
+  return true;
+}
+
+// Log server info
+function logServerInfo() {
+  console.error('\n=== 0xGasless MCP SERVER INFO ===');
+  console.error(`Chain ID: ${process.env.CHAIN_ID || '56 (default)'}`);
+  console.error(`RPC URL: ${process.env.RPC_URL}`);
+  console.error(`Private Key: ${process.env.PRIVATE_KEY ? '[SET]' : '[NOT SET]'}`);
+  console.error(`API Key: ${process.env.API_KEY ? '[SET]' : '[NOT SET]'}`);
+  console.error('=== END SERVER INFO ===\n');
 }
 
 export async function main() {
-  // Validate required environment variables
-  const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
-  const rpcUrl = process.env.RPC_URL;
-  const apiKey = process.env.API_KEY;
+  // Log server info and validate environment
+  logServerInfo();
   
-  if (!privateKey || !rpcUrl || !apiKey) {
-    console.error('Missing required environment variables');
+  if (!validateEnvironment()) {
     process.exit(1);
   }
 
-  // Create MCP server - this should be fast
+  try {
+    // Initialize agentkit early to catch any config issues
+    await initializeAgentkit();
+    console.error("✅ 0xGasless Agentkit initialized successfully");
+  } catch (error) {
+    console.error("❌ Failed to initialize Agentkit:", error);
+    process.exit(1);
+  }
+
+  // Create MCP server
   const server = new Server(
     {
       name: '0xGasless MCP Server',
@@ -131,32 +297,25 @@ export async function main() {
     }
   );
 
-  // Handle tools list - respond immediately
+  // Handle tools list
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return { tools };
+    const mcpTools = convertToMcpTools();
+    console.error(`📤 Returning ${mcpTools.length} MCP tools`);
+    return { tools: mcpTools };
   });
 
-  // Handle tool calls - initialize agent on first use
+  // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    console.error(`\n📞 MCP tool call: ${name}`, args);
+    
     try {
-      console.error(`Executing tool: ${request.params.name} with args:`, request.params.arguments);
-      
-      // Get agent (initialize if needed)
-      const { agent, config } = await getAgent();
-      
-      // Process the request with more specific prompts
-      const result = await processToolCall(agent, config, request.params.name, request.params.arguments);
-      
+      const result = await executeAgentkitAction(name, args || {});
       return {
-        content: [
-          {
-            type: 'text',
-            text: result,
-          },
-        ],
+        content: [{ type: 'text', text: result }],
       };
     } catch (error) {
-      console.error('Tool call error:', error);
+      console.error(`❌ Tool call error:`, error);
       return {
         content: [
           {
@@ -170,75 +329,7 @@ export async function main() {
 
   // Connect to transport
   const transport = new StdioServerTransport();
+  console.error('🔌 Connecting server to transport...');
   await server.connect(transport);
-}
-
-// Process tool calls with more direct instructions
-async function processToolCall(agent: any, config: any, toolName: string, args: any) {
-  let prompt = '';
-  
-  switch (toolName) {
-    case 'get-address':
-      prompt = 'Execute the get_wallet_address tool and return only my wallet address. Do not ask questions, just return the address.';
-      break;
-      
-    case 'get-balance':
-      const tokenAddress = args.address || '0x0000000000000000000000000000000000000000';
-      prompt = `Execute the get_balance tool for token address ${tokenAddress}. Return the exact balance without asking questions. If this is address 0x0000000000000000000000000000000000000000, check BNB balance.`;
-      break;
-      
-    case 'transfer-token':
-      prompt = `Execute a token transfer: send ${args.amount} tokens from contract ${args.address} to recipient ${args.to}. Perform the actual transfer operation using the transfer tool.`;
-      break;
-      
-    case 'swap-tokens':
-      prompt = `Execute a token swap: swap ${args.amount} tokens from ${args.fromToken} to ${args.toToken}. Use the swap tool to perform the actual swap operation.`;
-      break;
-      
-    default:
-      prompt = `Execute the ${toolName} tool with these exact parameters: ${JSON.stringify(args)}. Perform the actual operation, do not ask for clarification.`;
-  }
-  
-  try {
-    console.error(`Sending prompt to agent: ${prompt}`);
-    
-    // Use invoke with a more direct configuration
-    const result = await agent.invoke(
-      { 
-        input: prompt,
-        // Add instruction to be direct
-        system: "Execute the requested blockchain operation directly. Do not ask for confirmation or provide explanations unless there's an error. Return only the result."
-      }, 
-      {
-        ...config,
-        // Force direct execution
-        recursionLimit: 10
-      }
-    );
-    
-    console.error('Agent result:', JSON.stringify(result, null, 2));
-    
-    // Better result extraction
-    if (result.messages && result.messages.length > 0) {
-      const lastMessage = result.messages[result.messages.length - 1];
-      
-      // Look for the actual content in the message
-      if (lastMessage.content) {
-        return lastMessage.content;
-      }
-      
-      // Check if it's a tool call result
-      if (lastMessage.additional_kwargs?.tool_calls) {
-        const toolCall = lastMessage.additional_kwargs.tool_calls[0];
-        return `Tool executed: ${toolCall.function.name}\nResult: ${toolCall.function.arguments}`;
-      }
-    }
-    
-    // Fallback to output or stringified result
-    return result.output || result.content || JSON.stringify(result);
-    
-  } catch (error) {
-    console.error('Error in processToolCall:', error);
-    return `Error executing ${toolName}: ${error instanceof Error ? error.message : String(error)}`;
-  }
+  console.error('✅ 0xGasless MCP Server running on stdio');
 }
