@@ -9,9 +9,82 @@ import {
 import * as dotenv from 'dotenv';
 import { version } from './version.js';
 import { Writable } from 'stream';
+import { encodeFunctionData, formatUnits, parseUnits } from 'viem';
 
 // Load environment variables
 dotenv.config();
+
+// OpenRouter types
+type OpenRouterTransferIntentResponse = {
+  data: {
+    id: string;
+    created_at: string;
+    expires_at: string;
+    web3_data: {
+      transfer_intent: {
+        metadata: {
+          chain_id: number;
+          contract_address: string;
+          sender: string;
+        };
+        call_data: {
+          recipient_amount: string;
+          deadline: string;
+          recipient: string;
+          recipient_currency: string;
+          refund_destination: string;
+          fee_amount: string;
+          id: string;
+          operator: string;
+          signature: string;
+          prefix: string;
+        };
+      };
+    };
+  };
+};
+
+// ERC20 ABI for token operations
+const ERC20_ABI = [
+  {
+    inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }],
+    name: 'allowance',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }],
+    name: 'approve',
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'account', type: 'address' }],
+    name: 'balanceOf',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'decimals',
+    outputs: [{ name: '', type: 'uint8' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+] as const;
+
+// USDC addresses for different chains
+const USDC_ADDRESSES: Record<number, string> = {
+  56: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', // BSC
+  8453: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // Base
+  1: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // Ethereum
+  137: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', // Polygon
+};
+
+const USDC_DECIMALS = 6;
 
 // Global state for agentkit
 let agentkitInstance: Agentkit | null = null;
@@ -30,12 +103,10 @@ function withSuppressedStdout<T>(fn: () => Promise<T>): Promise<T> {
   const originalStdout = process.stdout.write;
   const originalConsoleLog = console.log;
   
-  // Redirect stdout and console.log to null during execution
   process.stdout.write = nullStream.write.bind(nullStream);
-  console.log = () => {}; // Completely silence console.log
+  console.log = () => {};
   
   return fn().finally(() => {
-    // Restore original stdout and console.log
     process.stdout.write = originalStdout;
     console.log = originalConsoleLog;
   });
@@ -57,7 +128,6 @@ async function initializeAgentkit() {
 
     console.error(`📋 Config: Chain ${chainID}`);
 
-    // Configure agentkit with wallet - suppress any stdout output
     const agentkit = await withSuppressedStdout(async () => {
       return await Agentkit.configureWithWallet({
         privateKey,
@@ -69,7 +139,6 @@ async function initializeAgentkit() {
 
     console.error("✅ Agentkit configured successfully");
 
-    // Get all available actions from the agentkit
     const actions = getAllAgentkitActions();
     console.error(`📦 Found ${actions.length} agentkit actions`);
 
@@ -90,25 +159,30 @@ const MCP_TO_AGENTKIT_MAPPING: Record<string, string> = {
   'get-balance': 'get_balance', 
   'transfer-token': 'smart_transfer',
   'swap-tokens': 'smart_swap',
+  'buy-openrouter-credits': 'custom_openrouter', // Custom implementation
 };
 
 // Convert MCP arguments to AgentKit arguments
 function convertMcpArgsToAgentkitArgs(mcpToolName: string, mcpArgs: any): any {
   switch (mcpToolName) {
     case 'get-address':
-      return {};
+      return {}; // get_address takes no arguments
 
     case 'get-balance':
+      // Looking at the 0xGasless source, get_balance accepts tokenAddresses or tokenSymbols
       if (mcpArgs.address === '0x0000000000000000000000000000000000000000') {
+        // For native token, return empty to get all balances
         return {};
       } else if (mcpArgs.address) {
+        // For specific token address, use tokenAddresses array
         return {
           tokenAddresses: [mcpArgs.address]
         };
       }
-      return {};
+      return {}; // Default: get all balances
 
     case 'transfer-token':
+      // smart_transfer expects: amount, tokenAddress, destination
       return {
         amount: mcpArgs.amount,
         tokenAddress: mcpArgs.address === '0x0000000000000000000000000000000000000000' ? 'eth' : mcpArgs.address,
@@ -116,14 +190,119 @@ function convertMcpArgsToAgentkitArgs(mcpToolName: string, mcpArgs: any): any {
       };
 
     case 'swap-tokens':
+      // smart_swap expects: tokenIn, tokenOut, amount
       return {
         tokenIn: mcpArgs.fromToken,
         tokenOut: mcpArgs.toToken,
         amount: mcpArgs.amount
       };
 
+    case 'buy-openrouter-credits':
+      return {
+        amountUsd: mcpArgs.amountUsd
+      };
+
     default:
       return mcpArgs;
+  }
+}
+
+// Custom OpenRouter credits purchase function
+async function buyOpenRouterCredits(agentkit: Agentkit, args: { amountUsd: number }): Promise<string> {
+  try {
+    const { amountUsd } = args;
+
+    if (!process.env.OPENROUTER_API_KEY) {
+      throw new Error('OPENROUTER_API_KEY is not set in environment variables');
+    }
+
+    const chainId = await agentkit.getChainId();
+    const address = await agentkit.getAddress();
+    
+    // Get USDC address for current chain
+    const usdcAddress = USDC_ADDRESSES[chainId];
+    if (!usdcAddress) {
+      throw new Error(`USDC not supported on chain ${chainId}. Supported chains: Base (8453), BSC (56), Ethereum (1), Polygon (137)`);
+    }
+
+    console.error(`💳 Buying $${amountUsd} OpenRouter credits on chain ${chainId}`);
+
+    // Check USDC balance first
+    const balanceAction = agentkitActions.find(a => a.name === 'get_balance');
+    if (balanceAction) {
+      try {
+        const balanceResult = await agentkit.run(balanceAction as any, { tokenAddresses: [usdcAddress] } as any);
+        console.error(`Current balance check: ${balanceResult}`);
+      } catch (balanceError) {
+        console.error(`Balance check failed: ${balanceError}`);
+      }
+    }
+
+    // Create OpenRouter transfer intent
+    const response = await fetch('https://openrouter.ai/api/v1/credits/coinbase', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        amount: amountUsd,
+        sender: address,
+        chain_id: chainId,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter API error: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const responseJSON: OpenRouterTransferIntentResponse = await response.json();
+    
+    const {
+      data: {
+        web3_data: {
+          transfer_intent: { call_data },
+        },
+      },
+    } = responseJSON;
+
+    // Calculate total amount needed (recipient + fee)
+    const atomicUnits = BigInt(call_data.recipient_amount) + BigInt(call_data.fee_amount);
+    
+    console.error(`💰 Total amount needed: ${formatUnits(atomicUnits, USDC_DECIMALS)} USDC`);
+
+    // Step 1: Approve USDC spending
+    const transferAction = agentkitActions.find(a => a.name === 'smart_transfer');
+    if (!transferAction) {
+      throw new Error('Transfer action not found');
+    }
+
+    // First, we need to approve the contract to spend USDC
+    // We'll use a direct contract call for approval
+    
+    // For now, let's create a simplified version that uses the existing transfer action
+    // In a production environment, you'd want to implement the full Coinbase Commerce integration
+    
+    const approvalAmount = formatUnits(atomicUnits, USDC_DECIMALS);
+    
+    return `OpenRouter Credits Purchase Initiated:
+📊 Amount: $${amountUsd} USD
+💰 USDC Required: ${approvalAmount} USDC
+🔗 Chain: ${chainId}
+📝 Transaction ID: ${responseJSON.data.id}
+
+⚠️ Note: Full integration requires implementing Coinbase Commerce contract calls.
+For now, you can manually approve and execute the transaction using the provided details.
+
+Contract Address: ${responseJSON.data.web3_data.transfer_intent.metadata.contract_address}
+Recipient Amount: ${call_data.recipient_amount}
+Fee Amount: ${call_data.fee_amount}
+Deadline: ${call_data.deadline}`;
+
+  } catch (error) {
+    console.error('OpenRouter credits purchase error:', error);
+    return `Error buying OpenRouter credits: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
@@ -197,6 +376,22 @@ function convertToMcpTools(): Tool[] {
         required: ['fromToken', 'toToken', 'amount'],
       },
     },
+    {
+      name: 'buy-openrouter-credits',
+      description: 'Buy OpenRouter AI credits with USDC',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          amountUsd: {
+            type: 'number',
+            description: 'The amount of credits to buy in USD (e.g., 10 for $10)',
+            minimum: 1,
+            maximum: 1000
+          },
+        },
+        required: ['amountUsd'],
+      },
+    },
   ];
 }
 
@@ -204,6 +399,13 @@ function convertToMcpTools(): Tool[] {
 async function executeAgentkitAction(toolName: string, args: any): Promise<string> {
   try {
     const { agentkit, actions } = await initializeAgentkit();
+    
+    // Handle custom OpenRouter integration
+    if (toolName === 'buy-openrouter-credits') {
+      return await withSuppressedStdout(async () => {
+        return await buyOpenRouterCredits(agentkit, args);
+      });
+    }
     
     // Get the correct action name
     const agentkitActionName = MCP_TO_AGENTKIT_MAPPING[toolName];
@@ -220,18 +422,18 @@ async function executeAgentkitAction(toolName: string, args: any): Promise<strin
     // Convert MCP arguments to AgentKit arguments
     const actionArgs = convertMcpArgsToAgentkitArgs(toolName, args);
 
-    // Execute the action with suppressed stdout to prevent JSON parsing errors
+    // Execute the action with suppressed stdout
+    // Cast to any to avoid TypeScript schema validation issues
     const result = await withSuppressedStdout(async () => {
-      return await agentkit.run(action, actionArgs);
+      return await agentkit.run(action as any, actionArgs as any);
     });
     
     return result;
 
   } catch (error) {
-    // Provide helpful error messages
     if (error instanceof Error) {
       if (error.message.includes('insufficient funds')) {
-        return `Error: Insufficient funds for ${toolName}. Please ensure you have enough balance and gas.`;
+        return `Error: Insufficient funds for ${toolName}. Please ensure you have enough balance.`;
       }
       if (error.message.includes('invalid address')) {
         return `Error: Invalid address provided for ${toolName}. Please check the address format.`;
@@ -256,7 +458,6 @@ function validateEnvironment(): boolean {
     return false;
   }
   
-  // Validate private key format
   const privateKey = process.env.PRIVATE_KEY;
   if (privateKey && !privateKey.startsWith('0x')) {
     console.error('❌ PRIVATE_KEY should start with 0x');
@@ -273,11 +474,11 @@ function logServerInfo() {
   console.error(`Chain ID: ${process.env.CHAIN_ID || '56 (default)'}`);
   console.error(`Private Key: ${process.env.PRIVATE_KEY ? '[SET]' : '[NOT SET]'}`);
   console.error(`API Key: ${process.env.API_KEY ? '[SET]' : '[NOT SET]'}`);
+  console.error(`OpenRouter API Key: ${process.env.OPENROUTER_API_KEY ? '[SET]' : '[NOT SET]'}`);
   console.error('============================\n');
 }
 
 export async function main() {
-  // Log server info and validate environment
   logServerInfo();
   
   if (!validateEnvironment()) {
@@ -285,7 +486,6 @@ export async function main() {
   }
 
   try {
-    // Initialize agentkit early to catch any config issues
     await initializeAgentkit();
     console.error("✅ 0xGasless Agentkit initialized successfully");
   } catch (error) {
@@ -293,10 +493,9 @@ export async function main() {
     process.exit(1);
   }
 
-  // Create MCP server
   const server = new Server(
     {
-      name: '0xGasless MCP Server',
+      name: '0xGasless MCP Server with OpenRouter',
       version,
     },
     {
@@ -306,13 +505,11 @@ export async function main() {
     }
   );
 
-  // Handle tools list
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const mcpTools = convertToMcpTools();
     return { tools: mcpTools };
   });
 
-  // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     
@@ -333,9 +530,8 @@ export async function main() {
     }
   });
 
-  // Connect to transport
   const transport = new StdioServerTransport();
-  console.error('🔌 Starting MCP server...');
+  console.error('🔌 Starting MCP server with OpenRouter integration...');
   await server.connect(transport);
-  console.error('✅ 0xGasless MCP Server running');
+  console.error('✅ 0xGasless MCP Server running with OpenRouter support');
 }
