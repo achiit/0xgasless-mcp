@@ -141,7 +141,7 @@ function convertToMcpTools(): Tool[] {
     },
     {
       name: 'get-balance',
-      description: 'Gets the balance of tokens in the smart account',
+      description: 'Gets the balance of tokens in the smart account on BSC',
       inputSchema: {
         type: 'object',
         properties: {
